@@ -1,0 +1,75 @@
+version: "3.9"
+
+services:
+  # ─── Infrastructure ───────────────────────────────────────────────
+  postgres:
+    image: postgis/postgis:16-3.4
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: grand_strategy
+      POSTGRES_USER: game
+      POSTGRES_PASSWORD: game_dev
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./tools/seed/sql:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U game -d grand_strategy"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  nats:
+    image: nats:2-alpine
+    ports:
+      - "4222:4222"   # Client
+      - "8222:8222"   # Monitoring
+    command: ["--jetstream", "--store_dir", "/data"]
+    volumes:
+      - natsdata:/data
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ─── Dev tools ────────────────────────────────────────────────────
+  pgadmin:
+    image: dpage/pgadmin4:8
+    ports:
+      - "5050:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@grandstrategy.dev
+      PGADMIN_DEFAULT_PASSWORD: admin
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles:
+      - tools
+
+  redis-insight:
+    image: redis/redisinsight:2
+    ports:
+      - "8001:8001"
+    depends_on:
+      redis:
+        condition: service_healthy
+    profiles:
+      - tools
+
+volumes:
+  pgdata:
+  redisdata:
+  natsdata:

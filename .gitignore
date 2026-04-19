@@ -1,0 +1,22 @@
+# Rust
+target/
+
+# Node
+node_modules/
+.next/
+out/
+
+# WASM output (rebuilt from crates/game-core-wasm)
+packages/game-core-wasm/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env*

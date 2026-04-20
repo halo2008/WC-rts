@@ -309,4 +309,41 @@ mod tests {
         // No hex with q=3 should be reachable
         assert!(!reachable.keys().any(|h| h.q == 3));
     }
+
+    #[test]
+    fn astar_wrap_prefers_shortcut_around_world() {
+        // Width 100: direct 97→3 is distance 94, wrap path is distance 6.
+        let width = 100;
+        let path = astar(Hex::new(97, 0), Hex::new(3, 0), |_| true, |_| 1.0, Some(width))
+            .expect("path must exist");
+        // Path must fit the wrap budget comfortably (6 hops + start = 7).
+        assert!(path.len() <= 8, "wrap path too long: {}", path.len());
+    }
+
+    #[test]
+    fn astar_respects_polar_clamp() {
+        // Impassable if off-grid (r < 0 or r >= height). Simulates polar clamp.
+        let height = 10;
+        let is_passable = move |h: Hex| h.r >= 0 && h.r < height;
+        let move_cost = |_: Hex| 1.0;
+        let start = Hex::new(5, 0);
+        let goal = Hex::new(5, 9);
+        let path = astar(start, goal, is_passable, move_cost, None)
+            .expect("must find a path inside the band");
+        // No hex in the path crosses the pole.
+        assert!(path.iter().all(|h| h.r >= 0 && h.r < height));
+    }
+
+    #[test]
+    fn astar_wall_of_mountains_routes_around() {
+        // Row r=3 is a wall except for a single passable hex at (10, 3).
+        let is_passable = |h: Hex| h.r != 3 || h.q == 10;
+        let move_cost = |h: Hex| if !is_passable(h) { f32::INFINITY } else { 1.0 };
+        let start = Hex::new(0, 0);
+        let goal = Hex::new(0, 6);
+        let path = astar(start, goal, is_passable, move_cost, None)
+            .expect("path must exist through the gap");
+        // Path must include the gap at (10, 3).
+        assert!(path.iter().any(|h| h.q == 10 && h.r == 3));
+    }
 }

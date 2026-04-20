@@ -6,30 +6,31 @@ use game_core::{
     BattlefieldGenerator, BattlefieldConfig, BattlefieldInstance,
     BuildingType, Building,
 };
+use std::cell::RefCell;
+use std::str::FromStr;
 use std::sync::OnceLock;
 
-/// Global strategic grid stored in WASM memory.
+/// Global strategic grid stored in WASM memory. Set-once; OnceLock is fine here.
 static GRID: OnceLock<StrategicGrid> = OnceLock::new();
 
-/// Global battlefield instance stored in WASM memory.
-static BATTLEFIELD: OnceLock<BattlefieldInstance> = OnceLock::new();
+thread_local! {
+    /// Current battlefield instance. Wrapped in `RefCell<Option<_>>` so we can
+    /// replace it on every `init_battlefield` call (zooming into a different hex).
+    static BATTLEFIELD: RefCell<Option<BattlefieldInstance>> = const { RefCell::new(None) };
+}
 
 fn get_grid() -> &'static StrategicGrid {
-    GRID.get().unwrap()
+    GRID.get().expect("grid not initialized — call init_grid first")
 }
 
-fn get_battlefield() -> &'static BattlefieldInstance {
-    BATTLEFIELD.get().unwrap()
+/// Borrow the current battlefield for reading. Returns `None` if uninitialized.
+fn with_battlefield<T>(f: impl FnOnce(&BattlefieldInstance) -> T) -> Option<T> {
+    BATTLEFIELD.with(|bf| bf.borrow().as_ref().map(f))
 }
 
-fn get_battlefield_mut() -> &'static mut BattlefieldInstance {
-    // SAFETY: We only call this from WASM which is single-threaded.
-    // OnceLock doesn't provide get_mut, so we use unsafe.
-    unsafe {
-        let ptr = &BATTLEFIELD as *const OnceLock<BattlefieldInstance>;
-        let ptr_mut = ptr as *mut OnceLock<BattlefieldInstance>;
-        (*ptr_mut).get_mut().unwrap()
-    }
+/// Borrow the current battlefield for mutation. Returns `None` if uninitialized.
+fn with_battlefield_mut<T>(f: impl FnOnce(&mut BattlefieldInstance) -> T) -> Option<T> {
+    BATTLEFIELD.with(|bf| bf.borrow_mut().as_mut().map(f))
 }
 
 // ─── Strategic Map Bindings (Etap 1) ────────────────────────────────
@@ -49,7 +50,10 @@ pub fn get_viewport_hexes(
 ) -> JsValue {
     let grid = get_grid();
     let cells = grid.viewport(cam_x, cam_y, view_width, view_height, hex_size);
-    let js_cells: Vec<JsHexCell> = cells.iter().map(|c| JsHexCell::from_cell(c, hex_size)).collect();
+    let js_cells: Vec<JsHexCell> = cells
+        .iter()
+        .map(|vc| JsHexCell::from_viewport(vc.cell, vc.render_q, hex_size))
+        .collect();
     serde_wasm_bindgen::to_value(&js_cells).unwrap()
 }
 
@@ -182,8 +186,8 @@ pub fn reachable_hexes(
 
 // ─── Battlefield Bindings (Etap 2) ─────────────────────────────────
 
-/// Initialize a battlefield instance for a strategic hex.
-/// This generates the battlefield terrain deterministically from the seed.
+/// Initialize (or replace) the active battlefield instance for a strategic hex.
+/// Generates the battlefield terrain deterministically from the seed.
 #[wasm_bindgen]
 pub fn init_battlefield(
     strategic_q: i32,
@@ -193,7 +197,7 @@ pub fn init_battlefield(
     macro_terrain: &str,
     macro_elevation: i32,
 ) -> JsValue {
-    let terrain = parse_terrain_str(macro_terrain);
+    let terrain = Terrain::from_str(macro_terrain).unwrap_or(Terrain::Plains);
     let config = BattlefieldConfig {
         width: size,
         height: size,
@@ -213,26 +217,14 @@ pub fn init_battlefield(
         height: instance.height,
         seed: instance.seed,
         status: format!("{:?}", instance.status),
-        macro_terrain: macro_terrain.to_string(),
+        macro_terrain: terrain.as_str().to_string(),
         buildings_count: instance.buildings.len(),
         deposits_count: instance.deposits.len(),
     };
 
-    // Store the instance globally
-    // We need to drop the old one first if it exists
-    unsafe {
-        let ptr = &BATTLEFIELD as *const OnceLock<BattlefieldInstance>;
-        let ptr_mut = ptr as *mut OnceLock<BattlefieldInstance>;
-        // Take the old value out if it exists
-        if (*ptr_mut).get().is_some() {
-            // Can't easily replace in OnceLock, so we use a different approach
-            // We'll write to a separate static
-        }
-    }
-    // Use set or get_or_init — but OnceLock can only be set once
-    // For battlefield, we use a different approach: Cell<Option<BattlefieldInstance>>
-    // For now, just store it and ignore if already set (first call wins)
-    let _ = BATTLEFIELD.set(instance);
+    BATTLEFIELD.with(|bf| {
+        *bf.borrow_mut() = Some(instance);
+    });
 
     serde_wasm_bindgen::to_value(&info).unwrap()
 }
@@ -246,17 +238,15 @@ pub fn get_battlefield_viewport(
     view_height: f32,
     hex_size: f32,
 ) -> JsValue {
-    if BATTLEFIELD.get().is_none() {
-        return JsValue::NULL;
-    }
-
-    let instance = get_battlefield();
-    let cells = instance.viewport(cam_x, cam_y, view_width, view_height, hex_size);
-    let js_cells: Vec<JsBattlefieldCell> = cells
-        .iter()
-        .map(|c| JsBattlefieldCell::from_cell(c, hex_size))
-        .collect();
-    serde_wasm_bindgen::to_value(&js_cells).unwrap()
+    with_battlefield(|instance| {
+        let cells = instance.viewport(cam_x, cam_y, view_width, view_height, hex_size);
+        let js_cells: Vec<JsBattlefieldCell> = cells
+            .iter()
+            .map(|c| JsBattlefieldCell::from_cell(c, hex_size))
+            .collect();
+        serde_wasm_bindgen::to_value(&js_cells).unwrap()
+    })
+    .unwrap_or(JsValue::NULL)
 }
 
 /// Place a building on the battlefield. Returns building ID or -1 on failure.
@@ -266,129 +256,108 @@ pub fn place_building(
     hex_q: i32,
     hex_r: i32,
 ) -> i64 {
-    if BATTLEFIELD.get().is_none() {
+    let Ok(bt) = BuildingType::from_str(building_type) else {
         return -1;
-    }
-
-    let bt = match parse_building_type_str(building_type) {
-        Some(bt) => bt,
-        None => return -1,
     };
 
-    let instance = get_battlefield_mut();
-    let next_id = instance.buildings.len() as u64 + 1;
-    let building = Building::new(next_id, bt, Hex::new(hex_q, hex_r));
-
-    match instance.place_building(building) {
-        Some(id) => id as i64,
-        None => -1,
-    }
+    with_battlefield_mut(|instance| {
+        let next_id = instance.buildings.len() as u64 + 1;
+        let building = Building::new(next_id, bt, Hex::new(hex_q, hex_r));
+        match instance.place_building(building) {
+            Some(id) => id as i64,
+            None => -1,
+        }
+    })
+    .unwrap_or(-1)
 }
 
 /// Get building info at a specific hex on the battlefield.
 #[wasm_bindgen]
 pub fn get_building_info(hex_q: i32, hex_r: i32) -> JsValue {
-    if BATTLEFIELD.get().is_none() {
-        return JsValue::NULL;
-    }
-
-    let instance = get_battlefield();
-    let buildings = instance.get_buildings_at(hex_q, hex_r);
-    if buildings.is_empty() {
-        return JsValue::NULL;
-    }
-
-    let js_buildings: Vec<JsBuilding> = buildings
-        .iter()
-        .map(|b| JsBuilding::from_building(b))
-        .collect();
-    serde_wasm_bindgen::to_value(&js_buildings).unwrap()
+    with_battlefield(|instance| {
+        let buildings = instance.get_buildings_at(hex_q, hex_r);
+        if buildings.is_empty() {
+            return JsValue::NULL;
+        }
+        let js_buildings: Vec<JsBuilding> = buildings
+            .iter()
+            .map(|b| JsBuilding::from_building(b))
+            .collect();
+        serde_wasm_bindgen::to_value(&js_buildings).unwrap()
+    })
+    .unwrap_or(JsValue::NULL)
 }
 
 /// Get all buildings on the current battlefield.
 #[wasm_bindgen]
 pub fn get_all_buildings() -> JsValue {
-    if BATTLEFIELD.get().is_none() {
-        return JsValue::NULL;
-    }
-
-    let instance = get_battlefield();
-    let js_buildings: Vec<JsBuilding> = instance
-        .buildings
-        .iter()
-        .map(|b| JsBuilding::from_building(b))
-        .collect();
-    serde_wasm_bindgen::to_value(&js_buildings).unwrap()
+    with_battlefield(|instance| {
+        let js_buildings: Vec<JsBuilding> = instance
+            .buildings
+            .iter()
+            .map(|b| JsBuilding::from_building(b))
+            .collect();
+        serde_wasm_bindgen::to_value(&js_buildings).unwrap()
+    })
+    .unwrap_or(JsValue::NULL)
 }
 
 /// Get all resource deposits on the current battlefield.
 #[wasm_bindgen]
 pub fn get_all_deposits() -> JsValue {
-    if BATTLEFIELD.get().is_none() {
-        return JsValue::NULL;
-    }
-
-    let instance = get_battlefield();
-    let js_deposits: Vec<JsDeposit> = instance
-        .deposits
-        .iter()
-        .map(|d| JsDeposit {
-            deposit_type: format!("{:?}", d.deposit_type),
-            hex_q: d.hex_q,
-            hex_r: d.hex_r,
-            richness: d.richness,
-        })
-        .collect();
-    serde_wasm_bindgen::to_value(&js_deposits).unwrap()
+    with_battlefield(|instance| {
+        let js_deposits: Vec<JsDeposit> = instance
+            .deposits
+            .iter()
+            .map(|d| JsDeposit {
+                deposit_type: d.deposit_type.as_str().to_string(),
+                hex_q: d.hex_q,
+                hex_r: d.hex_r,
+                richness: d.richness,
+            })
+            .collect();
+        serde_wasm_bindgen::to_value(&js_deposits).unwrap()
+    })
+    .unwrap_or(JsValue::NULL)
 }
 
 /// Get battlefield metadata.
 #[wasm_bindgen]
 pub fn get_battlefield_info() -> JsValue {
-    if BATTLEFIELD.get().is_none() {
-        return JsValue::NULL;
-    }
-
-    let instance = get_battlefield();
-    let info = JsBattlefieldInfo {
-        strategic_q: instance.strategic_q,
-        strategic_r: instance.strategic_r,
-        width: instance.width,
-        height: instance.height,
-        seed: instance.seed,
-        status: format!("{:?}", instance.status),
-        macro_terrain: format!("{:?}", instance.macro_terrain),
-        buildings_count: instance.buildings.len(),
-        deposits_count: instance.deposits.len(),
-    };
-    serde_wasm_bindgen::to_value(&info).unwrap()
+    with_battlefield(|instance| {
+        let info = JsBattlefieldInfo {
+            strategic_q: instance.strategic_q,
+            strategic_r: instance.strategic_r,
+            width: instance.width,
+            height: instance.height,
+            seed: instance.seed,
+            status: format!("{:?}", instance.status),
+            macro_terrain: instance.macro_terrain.as_str().to_string(),
+            buildings_count: instance.buildings.len(),
+            deposits_count: instance.deposits.len(),
+        };
+        serde_wasm_bindgen::to_value(&info).unwrap()
+    })
+    .unwrap_or(JsValue::NULL)
 }
 
 /// Get the list of all available building types with their properties.
 #[wasm_bindgen]
 pub fn get_building_types() -> JsValue {
-    let types = vec![
-        "Headquarters", "PowerPlant", "SupplyDepot", "Barracks", "Factory",
-        "Airfield", "Port", "Bunker", "TrenchLine", "Minefield",
-        "AABattery", "AntiTankPosition", "Wall", "Mine", "OilWell",
-        "Farm", "LumberMill", "RadarStation", "CommsTower", "ResearchLab", "Hospital",
-    ];
-    let js_types: Vec<JsBuildingTypeInfo> = types
+    let js_types: Vec<JsBuildingTypeInfo> = BuildingType::ALL
         .iter()
-        .filter_map(|&name| {
-            let bt = parse_building_type_str(name)?;
-            Some(JsBuildingTypeInfo {
-                name: name.to_string(),
-                category: format!("{:?}", bt.category()),
-                build_time: bt.build_time(),
-                max_level: bt.max_level(),
-                base_hp: bt.base_hp(),
-                power_balance: bt.power_balance(),
-                is_fortification: bt.is_fortification(),
-                is_extraction: bt.is_extraction(),
-                color: bt.color_rgb(),
-                label: bt.label().to_string(),
-            })
+        .copied()
+        .map(|bt| JsBuildingTypeInfo {
+            name: bt.as_str().to_string(),
+            category: format!("{:?}", bt.category()),
+            build_time: bt.build_time(),
+            max_level: bt.max_level(),
+            base_hp: bt.base_hp(),
+            power_balance: bt.power_balance(),
+            is_fortification: bt.is_fortification(),
+            is_extraction: bt.is_extraction(),
+            color: bt.color_rgb(),
+            label: bt.label().to_string(),
         })
         .collect();
     serde_wasm_bindgen::to_value(&js_types).unwrap()
@@ -416,20 +385,30 @@ struct JsHexCell {
     terrain: String,
     color: [u8; 3],
     elevation: i32,
+    movement_cost: f32,
     px: f32,
     py: f32,
 }
 
 impl JsHexCell {
     fn from_cell(cell: &HexCell, hex_size: f32) -> Self {
-        let (px, py) = hex_to_pixel(cell.hex, hex_size);
+        Self::from_viewport(cell, cell.hex.q, hex_size)
+    }
+
+    /// Build a JsHexCell for a viewport render, using `render_q` (possibly
+    /// outside `[0, width)`) so the pixel position reflects the correct
+    /// wrap-around copy. `q`/`r` stay canonical so the frontend can still
+    /// match hexes by identity.
+    fn from_viewport(cell: &HexCell, render_q: i32, hex_size: f32) -> Self {
+        let (px, py) = hex_to_pixel(Hex::new(render_q, cell.hex.r), hex_size);
         let (r, g, b) = cell.terrain.color_rgb();
         JsHexCell {
             q: cell.hex.q,
             r: cell.hex.r,
-            terrain: format!("{:?}", cell.terrain),
+            terrain: cell.terrain.as_str().to_string(),
             color: [r, g, b],
             elevation: cell.elevation,
+            movement_cost: cell.terrain.movement_cost(),
             px,
             py,
         }
@@ -474,14 +453,14 @@ impl JsBattlefieldCell {
         JsBattlefieldCell {
             q: cell.hex.q,
             r: cell.hex.r,
-            terrain: format!("{:?}", cell.terrain),
+            terrain: cell.terrain.as_str().to_string(),
             color: [r, g, b],
             elevation: cell.elevation,
             forest_density: cell.forest_density,
             has_road: cell.has_road,
             has_river: cell.has_river,
             building_id: cell.building_id,
-            deposit: cell.deposit.map(|d| format!("{:?}", d)),
+            deposit: cell.deposit.map(|d| d.as_str().to_string()),
             cover_bonus: cell.cover_bonus(),
             movement_cost: cell.movement_cost(),
             px,
@@ -510,7 +489,7 @@ impl JsBuilding {
     fn from_building(b: &Building) -> Self {
         JsBuilding {
             id: b.id,
-            building_type: format!("{:?}", b.building_type),
+            building_type: b.building_type.as_str().to_string(),
             hex_q: b.hex.q,
             hex_r: b.hex.r,
             level: b.level,
@@ -545,50 +524,4 @@ struct JsBuildingTypeInfo {
     is_extraction: bool,
     color: (u8, u8, u8),
     label: String,
-}
-
-// ─── Helpers ────────────────────────────────────────────────────────
-
-fn parse_terrain_str(s: &str) -> Terrain {
-    match s {
-        "DeepOcean" => Terrain::DeepOcean,
-        "Ocean" => Terrain::Ocean,
-        "Coast" => Terrain::Coast,
-        "Plains" => Terrain::Plains,
-        "Forest" => Terrain::Forest,
-        "Hills" => Terrain::Hills,
-        "Mountain" => Terrain::Mountain,
-        "Desert" => Terrain::Desert,
-        "Tundra" => Terrain::Tundra,
-        "Urban" => Terrain::Urban,
-        "Ice" => Terrain::Ice,
-        _ => Terrain::Plains,
-    }
-}
-
-fn parse_building_type_str(s: &str) -> Option<BuildingType> {
-    match s {
-        "Headquarters" => Some(BuildingType::Headquarters),
-        "PowerPlant" => Some(BuildingType::PowerPlant),
-        "SupplyDepot" => Some(BuildingType::SupplyDepot),
-        "Barracks" => Some(BuildingType::Barracks),
-        "Factory" => Some(BuildingType::Factory),
-        "Airfield" => Some(BuildingType::Airfield),
-        "Port" => Some(BuildingType::Port),
-        "Bunker" => Some(BuildingType::Bunker),
-        "TrenchLine" => Some(BuildingType::TrenchLine),
-        "Minefield" => Some(BuildingType::Minefield),
-        "AABattery" => Some(BuildingType::AABattery),
-        "AntiTankPosition" => Some(BuildingType::AntiTankPosition),
-        "Wall" => Some(BuildingType::Wall),
-        "Mine" => Some(BuildingType::Mine),
-        "OilWell" => Some(BuildingType::OilWell),
-        "Farm" => Some(BuildingType::Farm),
-        "LumberMill" => Some(BuildingType::LumberMill),
-        "RadarStation" => Some(BuildingType::RadarStation),
-        "CommsTower" => Some(BuildingType::CommsTower),
-        "ResearchLab" => Some(BuildingType::ResearchLab),
-        "Hospital" => Some(BuildingType::Hospital),
-        _ => None,
-    }
 }

@@ -10,6 +10,15 @@ pub struct HexCell {
     pub elevation: i32,
 }
 
+/// A viewport query result: the cell plus the *unwrapped* q column it is
+/// rendered at. For hexes past the anti-meridian, `render_q` may be outside
+/// `[0, width)` — this lets the renderer place the wrap-around copy at the
+/// right world-x without guessing.
+pub struct ViewportCell<'a> {
+    pub cell: &'a HexCell,
+    pub render_q: i32,
+}
+
 /// Strategic world map grid (equirectangular, 1200x600).
 pub struct StrategicGrid {
     pub width: i32,
@@ -72,28 +81,38 @@ impl StrategicGrid {
         view_width: f32,
         view_height: f32,
         hex_size: f32,
-    ) -> Vec<&HexCell> {
+    ) -> Vec<ViewportCell<'_>> {
         let sq3 = 3.0_f32.sqrt();
         let hex_w = sq3 * hex_size;
-        let hex_h = 2.0 * hex_size;
+        // Pointy-top rows are 1.5 * size tall (not 2.0 * size — that's a flat-top
+        // hex). Getting this wrong causes row range to be ~33% too tight and the
+        // top/bottom rows to drop out.
+        let row_h = 1.5 * hex_size;
 
-        let min_q_col = ((cam_x - view_width / 2.0) / hex_w).floor() as i32 - 1;
-        let max_q_col = ((cam_x + view_width / 2.0) / hex_w).ceil() as i32 + 1;
-        let min_r_row = ((cam_y - view_height / 2.0) / hex_h).floor() as i32 - 1;
-        let max_r_row = ((cam_y + view_height / 2.0) / hex_h).ceil() as i32 + 1;
+        let min_r_row = ((cam_y - view_height / 2.0) / row_h).floor() as i32 - 1;
+        let max_r_row = ((cam_y + view_height / 2.0) / row_h).ceil() as i32 + 1;
 
         let mut result = Vec::new();
         for r in min_r_row.max(0)..=max_r_row.min(self.height - 1) {
+            // Each row is shifted right by r/2 columns (pointy-top axial → pixel).
+            // Compute the visible column range per-row, otherwise larger r values
+            // lose the left half of the viewport (the "diagonal cut" bug).
+            let offset = r as f32 / 2.0;
+            let min_q_col = ((cam_x - view_width / 2.0) / hex_w - offset).floor() as i32 - 1;
+            let max_q_col = ((cam_x + view_width / 2.0) / hex_w - offset).ceil() as i32 + 1;
             for q_col in min_q_col..=max_q_col {
                 let q = ((q_col % self.width) + self.width) % self.width;
                 if let Some(cell) = self.get(q, r) {
-                    let (px, py) = hex_to_pixel(cell.hex, hex_size);
+                    // Use q_col (may be negative or >= width) so the pixel
+                    // position reflects the wrap-around copy actually visible,
+                    // not the canonical hex at cell.hex.q.
+                    let (px, py) = hex_to_pixel(Hex::new(q_col, r), hex_size);
                     if px >= cam_x - view_width / 2.0 - hex_w
                         && px <= cam_x + view_width / 2.0 + hex_w
-                        && py >= cam_y - view_height / 2.0 - hex_h
-                        && py <= cam_y + view_height / 2.0 + hex_h
+                        && py >= cam_y - view_height / 2.0 - row_h
+                        && py <= cam_y + view_height / 2.0 + row_h
                     {
-                        result.push(cell);
+                        result.push(ViewportCell { cell, render_q: q_col });
                     }
                 }
             }
@@ -102,67 +121,150 @@ impl StrategicGrid {
     }
 }
 
-/// Placeholder terrain generation — latitude + simple noise approximation.
-/// Produces a rough globe: oceans, poles, bands of terrain.
+/// Earth-shaped terrain generator. Continents are sum-of-Gaussian blobs at
+/// roughly their real-world centres; noise on top breaks up smooth edges
+/// so coastlines look organic. Not remotely satellite-accurate — the goal
+/// is "rozpoznawalnie Ziemia" when you zoom out or flip to polar view.
 fn generate_placeholder_terrain(q: i32, r: i32, width: i32, height: i32) -> Terrain {
-    let lat = r as f32 / height as f32; // 0 = north pole, 1 = south pole
-    let _lon = q as f32 / width as f32;
+    // Geographic coords: lon ∈ (-180, 180], lat ∈ (-90, 90].
+    let lon = (q as f32 / width as f32) * 360.0 - 180.0;
+    let lat = 90.0 - (r as f32 / height as f32) * 180.0;
 
-    // Pseudo-noise based on position (deterministic, no rand)
-    let noise = simple_hash(q, r) as f32 / u32::MAX as f32;
-
-    // Polar regions
-    if lat < 0.08 || lat > 0.92 {
-        return if noise < 0.3 { Terrain::Ice } else { Terrain::Tundra };
+    // Ice cap — hard north/south polar rings. Gives the flat-earth "ice
+    // wall" look around the outer rim of the polar projection.
+    if lat < -75.0 || lat > 82.0 {
+        return Terrain::Ice;
     }
-    if lat < 0.13 || lat > 0.87 {
-        return if noise < 0.4 {
-            Terrain::Tundra
-        } else if noise < 0.7 {
-            Terrain::Forest
+
+    // Continent mass — higher = more landy. Each blob: (centre_lon,
+    // centre_lat, stddev_lon, stddev_lat, strength). Stddev in degrees.
+    let mut mass: f32 = 0.0;
+    // North America (main body)
+    mass += blob(lon, lat, -100.0, 45.0, 32.0, 18.0, 1.5);
+    // NA northern stretch / Canada
+    mass += blob(lon, lat, -95.0, 60.0, 40.0, 10.0, 1.2);
+    // Central America
+    mass += blob(lon, lat, -85.0, 18.0, 12.0, 8.0, 1.0);
+    // South America
+    mass += blob(lon, lat, -62.0, -15.0, 14.0, 22.0, 1.3);
+    // Greenland
+    mass += blob(lon, lat, -40.0, 72.0, 14.0, 8.0, 1.4);
+    // Europe
+    mass += blob(lon, lat, 15.0, 52.0, 22.0, 12.0, 1.4);
+    // Scandinavia
+    mass += blob(lon, lat, 18.0, 64.0, 12.0, 8.0, 1.2);
+    // North Africa + Sahara
+    mass += blob(lon, lat, 18.0, 18.0, 22.0, 14.0, 1.3);
+    // Sub-Saharan + Southern Africa
+    mass += blob(lon, lat, 25.0, -10.0, 18.0, 20.0, 1.2);
+    // Middle East
+    mass += blob(lon, lat, 50.0, 30.0, 14.0, 10.0, 1.1);
+    // Asia (main)
+    mass += blob(lon, lat, 95.0, 45.0, 42.0, 18.0, 1.5);
+    // Siberia
+    mass += blob(lon, lat, 110.0, 65.0, 48.0, 10.0, 1.3);
+    // India
+    mass += blob(lon, lat, 78.0, 22.0, 12.0, 10.0, 1.1);
+    // South-East Asia / Indonesia
+    mass += blob(lon, lat, 115.0, 5.0, 18.0, 8.0, 1.0);
+    // Australia
+    mass += blob(lon, lat, 135.0, -25.0, 16.0, 10.0, 1.2);
+    // Antarctica — big continuous landmass at the south polar cap
+    if lat < -65.0 {
+        mass += 2.5;
+    }
+
+    // Noise adds fractal-looking coastlines so the blobs aren't circular.
+    let n = simple_hash(q, r) as f32 / u32::MAX as f32;
+    let n2 = simple_hash(q + 7919, r + 1597) as f32 / u32::MAX as f32;
+    let noise = (n - 0.5) * 0.45 + (n2 - 0.5) * 0.25;
+
+    let effective = mass + noise;
+
+    if effective < 0.35 {
+        // Deep ocean unless close to the coast.
+        if effective < 0.15 {
+            Terrain::DeepOcean
         } else {
             Terrain::Ocean
-        };
-    }
-
-    // Subtropical desert bands
-    if (lat > 0.22 && lat < 0.32) || (lat > 0.68 && lat < 0.78) {
-        if noise < 0.35 {
-            return Terrain::Desert;
         }
-        if noise < 0.55 {
-            return Terrain::Plains;
-        }
-    }
-
-    // Temperate zone
-    let land_chance = 0.45 + 0.15 * (simple_hash(q + 1000, r) as f32 / u32::MAX as f32);
-    if noise < land_chance {
-        let sub = simple_hash(q + 500, r + 500) as f32 / u32::MAX as f32;
-        if sub < 0.35 {
-            return Terrain::Plains;
-        }
-        if sub < 0.55 {
-            return Terrain::Forest;
-        }
-        if sub < 0.70 {
-            return Terrain::Hills;
-        }
-        if sub < 0.80 {
-            return Terrain::Mountain;
-        }
-        if sub < 0.88 {
-            return Terrain::Urban;
-        }
+    } else if effective < 0.55 {
+        // Shallow coast band just off the landmass.
         Terrain::Coast
     } else {
-        let deep = simple_hash(q + 2000, r + 2000) as f32 / u32::MAX as f32;
-        if deep < 0.6 {
-            Terrain::Ocean
+        // Land — classify by latitude + inland hash.
+        let sub = simple_hash(q + 500, r + 500) as f32 / u32::MAX as f32;
+        let abs_lat = lat.abs();
+
+        if abs_lat > 60.0 {
+            // Boreal / tundra
+            if sub < 0.5 { Terrain::Tundra } else { Terrain::Forest }
+        } else if abs_lat < 30.0 && is_desert_band(lon, lat) {
+            if sub < 0.7 { Terrain::Desert } else { Terrain::Plains }
         } else {
-            Terrain::DeepOcean
+            // Temperate — plains / forest / hills / occasional mountain.
+            if sub < 0.35 {
+                Terrain::Plains
+            } else if sub < 0.60 {
+                Terrain::Forest
+            } else if sub < 0.78 {
+                Terrain::Hills
+            } else if sub < 0.92 {
+                Terrain::Mountain
+            } else {
+                Terrain::Urban
+            }
         }
     }
+}
+
+/// Gaussian-like continent blob. Longitude handled with a 360° wrap so
+/// continents straddling the antimeridian (unused here) work regardless.
+fn blob(
+    lon: f32,
+    lat: f32,
+    cx: f32,
+    cy: f32,
+    sx: f32,
+    sy: f32,
+    strength: f32,
+) -> f32 {
+    let dlon = {
+        let mut d = (lon - cx).rem_euclid(360.0);
+        if d > 180.0 {
+            d -= 360.0;
+        }
+        d
+    };
+    let dlat = lat - cy;
+    let rr = (dlon / sx).powi(2) + (dlat / sy).powi(2);
+    strength * (-rr).exp()
+}
+
+/// Rough subtropical desert bands — Sahara / Arabia / Kalahari / Gobi /
+/// Outback. Region check only; elsewhere we stay in the temperate classifier.
+fn is_desert_band(lon: f32, lat: f32) -> bool {
+    let abs_lat = lat.abs();
+    if !(15.0..=32.0).contains(&abs_lat) {
+        return false;
+    }
+    // Sahara + Arabia (lat > 0)
+    if lat > 0.0 && (-15.0..=55.0).contains(&lon) {
+        return true;
+    }
+    // Gobi (lat > 0, east Asia)
+    if lat > 35.0 && (90.0..=115.0).contains(&lon) {
+        return true;
+    }
+    // Outback (lat < 0)
+    if lat < 0.0 && (115.0..=140.0).contains(&lon) {
+        return true;
+    }
+    // Kalahari (lat < 0, south Africa)
+    if lat < 0.0 && (15.0..=30.0).contains(&lon) {
+        return true;
+    }
+    false
 }
 
 fn placeholder_elevation(q: i32, r: i32, _width: i32, height: i32) -> i32 {

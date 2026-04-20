@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use ts_rs::TS;
 use super::types::BuildingType;
 
@@ -41,7 +42,41 @@ impl DepositType {
             DepositType::Timber => (0, 100, 0),
         }
     }
+
+    /// Canonical name (matches Debug/serde/DB CHECK constraint).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DepositType::Metals => "Metals",
+            DepositType::Oil => "Oil",
+            DepositType::Farmland => "Farmland",
+            DepositType::Timber => "Timber",
+        }
+    }
 }
+
+impl FromStr for DepositType {
+    type Err = ParseDepositTypeError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "Metals" => DepositType::Metals,
+            "Oil" => DepositType::Oil,
+            "Farmland" => DepositType::Farmland,
+            "Timber" => DepositType::Timber,
+            _ => return Err(ParseDepositTypeError(s.to_string())),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ParseDepositTypeError(pub String);
+
+impl std::fmt::Display for ParseDepositTypeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown deposit type: {}", self.0)
+    }
+}
+
+impl std::error::Error for ParseDepositTypeError {}
 
 /// A resource deposit on a battlefield hex.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

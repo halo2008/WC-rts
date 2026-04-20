@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use ts_rs::TS;
 use crate::hex::Hex;
 
@@ -251,7 +252,81 @@ impl BuildingType {
             BuildingType::Hospital => "Hospital",
         }
     }
+
+    /// Canonical enum-variant name (matches Debug/serde).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BuildingType::Headquarters => "Headquarters",
+            BuildingType::PowerPlant => "PowerPlant",
+            BuildingType::SupplyDepot => "SupplyDepot",
+            BuildingType::Barracks => "Barracks",
+            BuildingType::Factory => "Factory",
+            BuildingType::Airfield => "Airfield",
+            BuildingType::Port => "Port",
+            BuildingType::Bunker => "Bunker",
+            BuildingType::TrenchLine => "TrenchLine",
+            BuildingType::Minefield => "Minefield",
+            BuildingType::AABattery => "AABattery",
+            BuildingType::AntiTankPosition => "AntiTankPosition",
+            BuildingType::Wall => "Wall",
+            BuildingType::Mine => "Mine",
+            BuildingType::OilWell => "OilWell",
+            BuildingType::Farm => "Farm",
+            BuildingType::LumberMill => "LumberMill",
+            BuildingType::RadarStation => "RadarStation",
+            BuildingType::CommsTower => "CommsTower",
+            BuildingType::ResearchLab => "ResearchLab",
+            BuildingType::Hospital => "Hospital",
+        }
+    }
+
+    /// All variants, in a stable order suitable for UI listings.
+    pub const ALL: [BuildingType; 21] = [
+        BuildingType::Headquarters,
+        BuildingType::PowerPlant,
+        BuildingType::SupplyDepot,
+        BuildingType::Barracks,
+        BuildingType::Factory,
+        BuildingType::Airfield,
+        BuildingType::Port,
+        BuildingType::Bunker,
+        BuildingType::TrenchLine,
+        BuildingType::Minefield,
+        BuildingType::AABattery,
+        BuildingType::AntiTankPosition,
+        BuildingType::Wall,
+        BuildingType::Mine,
+        BuildingType::OilWell,
+        BuildingType::Farm,
+        BuildingType::LumberMill,
+        BuildingType::RadarStation,
+        BuildingType::CommsTower,
+        BuildingType::ResearchLab,
+        BuildingType::Hospital,
+    ];
 }
+
+impl FromStr for BuildingType {
+    type Err = ParseBuildingTypeError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        BuildingType::ALL
+            .iter()
+            .copied()
+            .find(|bt| bt.as_str() == s)
+            .ok_or_else(|| ParseBuildingTypeError(s.to_string()))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ParseBuildingTypeError(pub String);
+
+impl std::fmt::Display for ParseBuildingTypeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown building type: {}", self.0)
+    }
+}
+
+impl std::error::Error for ParseBuildingTypeError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 pub enum BuildingCategory {
@@ -326,5 +401,22 @@ impl Building {
         } else {
             self.hp as f32 / self.max_hp as f32
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn building_type_from_str_roundtrip() {
+        for bt in BuildingType::ALL {
+            assert_eq!(BuildingType::from_str(bt.as_str()).unwrap(), bt);
+        }
+    }
+
+    #[test]
+    fn building_type_from_str_rejects_garbage() {
+        assert!(BuildingType::from_str("NotABuilding").is_err());
     }
 }

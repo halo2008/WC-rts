@@ -6,6 +6,7 @@ use axum::{
     http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use uuid::Uuid;
 use crate::AppState;
 
@@ -154,6 +155,20 @@ async fn get_battlefield(
 
     let id = Uuid::new_v4();
 
+    // Generate the instance via game-core — single source of truth for terrain + deposits.
+    let terrain = game_core::Terrain::from_str(&macro_terrain)
+        .unwrap_or(game_core::Terrain::Plains);
+    let config = game_core::BattlefieldConfig {
+        width: size as i32,
+        height: size as i32,
+        seed,
+        strategic_q: q,
+        strategic_r: r,
+        macro_terrain: terrain,
+        macro_elevation,
+    };
+    let instance = game_core::BattlefieldGenerator::generate(config);
+
     sqlx::query(
         "INSERT INTO battlefield_instances (id, strategic_q, strategic_r, size, seed, status, macro_terrain, macro_elevation) \
          VALUES ($1, $2, $3, $4, $5, 'CALM', $6, $7)"
@@ -163,7 +178,7 @@ async fn get_battlefield(
     .bind(r)
     .bind(size)
     .bind(seed as i64)
-    .bind(&macro_terrain)
+    .bind(terrain.as_str())
     .bind(macro_elevation)
     .execute(&state.db)
     .await
@@ -172,21 +187,22 @@ async fn get_battlefield(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    // Generate and store resource deposits
-    let deposits = generate_deposits_for_terrain(&macro_terrain, seed);
-    for (dq, dr, dtype, richness) in deposits {
-        sqlx::query(
+    // Persist the generator's deposits so server, wasm and DB always agree.
+    for deposit in &instance.deposits {
+        if let Err(e) = sqlx::query(
             "INSERT INTO resource_deposits (battlefield_id, deposit_type, hex_q, hex_r, richness) \
              VALUES ($1, $2, $3, $4, $5)"
         )
         .bind(id)
-        .bind(&dtype)
-        .bind(dq)
-        .bind(dr)
-        .bind(richness)
+        .bind(deposit.deposit_type.as_str())
+        .bind(deposit.hex_q)
+        .bind(deposit.hex_r)
+        .bind(deposit.richness)
         .execute(&state.db)
         .await
-        .ok(); // Don't fail on deposit insert errors
+        {
+            tracing::warn!("Failed to insert deposit for battlefield {}: {}", id, e);
+        }
     }
 
     tracing::info!("Created battlefield instance for hex ({}, {})", q, r);
@@ -198,7 +214,7 @@ async fn get_battlefield(
         size,
         seed: seed as i64,
         status: "CALM".to_string(),
-        macro_terrain,
+        macro_terrain: terrain.as_str().to_string(),
         macro_elevation,
         buildings_count: 0,
     }))
@@ -251,7 +267,8 @@ async fn build_building(
     }
 
     // Get building stats from game-core
-    let building_type = parse_building_type(&req.building_type)?;
+    let building_type = game_core::BuildingType::from_str(&req.building_type)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
     let max_hp = building_type.base_hp();
     let total_time = building_type.build_time();
 
@@ -399,7 +416,8 @@ async fn get_battlefield_viewport(
     let (_bf_id, size, seed, macro_terrain, macro_elevation) = bf;
 
     // Generate battlefield using game-core
-    let terrain = parse_terrain(&macro_terrain);
+    let terrain = game_core::Terrain::from_str(&macro_terrain)
+        .unwrap_or(game_core::Terrain::Plains);
     let config = game_core::BattlefieldConfig {
         width: size as i32,
         height: size as i32,
@@ -437,104 +455,15 @@ async fn get_battlefield_viewport(
         BattlefieldCellResponse {
             q: cell.hex.q,
             r: cell.hex.r,
-            terrain: format!("{:?}", cell.terrain),
+            terrain: cell.terrain.as_str().to_string(),
             elevation: cell.elevation,
             forest_density: cell.forest_density,
             has_road: cell.has_road,
             has_river: cell.has_river,
             building_id: buildings.get(&(cell.hex.q, cell.hex.r)).copied(),
-            deposit: cell.deposit.map(|d| format!("{:?}", d)),
+            deposit: cell.deposit.map(|d| d.as_str().to_string()),
         }
     }).collect();
 
     Ok(Json(response))
-}
-
-// ─── Helpers ────────────────────────────────────────────────────────
-
-fn parse_building_type(s: &str) -> Result<game_core::BuildingType, StatusCode> {
-    match s {
-        "Headquarters" => Ok(game_core::BuildingType::Headquarters),
-        "PowerPlant" => Ok(game_core::BuildingType::PowerPlant),
-        "SupplyDepot" => Ok(game_core::BuildingType::SupplyDepot),
-        "Barracks" => Ok(game_core::BuildingType::Barracks),
-        "Factory" => Ok(game_core::BuildingType::Factory),
-        "Airfield" => Ok(game_core::BuildingType::Airfield),
-        "Port" => Ok(game_core::BuildingType::Port),
-        "Bunker" => Ok(game_core::BuildingType::Bunker),
-        "TrenchLine" => Ok(game_core::BuildingType::TrenchLine),
-        "Minefield" => Ok(game_core::BuildingType::Minefield),
-        "AABattery" => Ok(game_core::BuildingType::AABattery),
-        "AntiTankPosition" => Ok(game_core::BuildingType::AntiTankPosition),
-        "Wall" => Ok(game_core::BuildingType::Wall),
-        "Mine" => Ok(game_core::BuildingType::Mine),
-        "OilWell" => Ok(game_core::BuildingType::OilWell),
-        "Farm" => Ok(game_core::BuildingType::Farm),
-        "LumberMill" => Ok(game_core::BuildingType::LumberMill),
-        "RadarStation" => Ok(game_core::BuildingType::RadarStation),
-        "CommsTower" => Ok(game_core::BuildingType::CommsTower),
-        "ResearchLab" => Ok(game_core::BuildingType::ResearchLab),
-        "Hospital" => Ok(game_core::BuildingType::Hospital),
-        _ => Err(StatusCode::BAD_REQUEST),
-    }
-}
-
-fn parse_terrain(s: &str) -> game_core::Terrain {
-    match s {
-        "DeepOcean" => game_core::Terrain::DeepOcean,
-        "Ocean" => game_core::Terrain::Ocean,
-        "Coast" => game_core::Terrain::Coast,
-        "Plains" => game_core::Terrain::Plains,
-        "Forest" => game_core::Terrain::Forest,
-        "Hills" => game_core::Terrain::Hills,
-        "Mountain" => game_core::Terrain::Mountain,
-        "Desert" => game_core::Terrain::Desert,
-        "Tundra" => game_core::Terrain::Tundra,
-        "Urban" => game_core::Terrain::Urban,
-        "Ice" => game_core::Terrain::Ice,
-        _ => game_core::Terrain::Plains,
-    }
-}
-
-/// Generate resource deposits for a given macro terrain, matching game-core logic.
-fn generate_deposits_for_terrain(macro_terrain: &str, seed: u64) -> Vec<(i32, i32, String, f32)> {
-    let mut deposits = Vec::new();
-    let mut rng_state = seed + 999;
-
-    let count = match macro_terrain {
-        "Mountain" | "Hills" => 4,
-        "Desert" => 3,
-        "Forest" => 3,
-        _ => 2,
-    };
-
-    let deposit_type = match macro_terrain {
-        "Mountain" | "Hills" => "Metals",
-        "Desert" => "Oil",
-        "Forest" => "Timber",
-        "Plains" => "Farmland",
-        _ => "Metals",
-    };
-
-    for _ in 0..count {
-        // Simple xorshift for deterministic placement
-        rng_state ^= rng_state << 13;
-        rng_state ^= rng_state >> 7;
-        rng_state ^= rng_state << 17;
-        let dq = ((rng_state % 54) + 5) as i32;
-
-        rng_state ^= rng_state << 13;
-        rng_state ^= rng_state >> 7;
-        rng_state ^= rng_state << 17;
-        let dr = ((rng_state % 54) + 5) as i32;
-
-        rng_state ^= rng_state << 13;
-        rng_state ^= rng_state >> 7;
-        rng_state ^= rng_state << 17;
-        let richness = 0.5 + (rng_state % 150) as f32 / 100.0;
-
-        deposits.push((dq, dr, deposit_type.to_string(), richness));
-    }
-
-    deposits
 }

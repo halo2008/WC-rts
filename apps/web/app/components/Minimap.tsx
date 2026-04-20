@@ -105,30 +105,30 @@ export default function Minimap({
     };
   }, [mapPixelWidth, mapPixelHeight]);
 
-  // Update viewport rectangle
+  // Update viewport rectangle. camX/camY in HexMap is the viewport *center* in
+  // world pixels, so we shift by half the viewport when drawing the frame.
   useEffect(() => {
     const rect = viewportRectRef.current;
     if (!rect) return;
 
     const scale = MINIMAP_SCALE / hexSize;
-    const vx = camX * scale;
-    const vy = camY * scale;
     const vw = viewWidth * scale;
     const vh = viewHeight * scale;
+    const vx = camX * scale - vw / 2;
+    const vy = camY * scale - vh / 2;
 
     rect.clear();
     rect.rect(vx, vy, vw, vh);
-    rect.stroke({ color: 0xffffff, width: 1, alpha: 0.8 });
+    rect.stroke({ color: 0xffffff, width: 1, alpha: 0.9 });
   }, [camX, camY, hexSize, viewWidth, viewHeight]);
 
-  // Click to navigate
+  // Click to navigate — the clicked world pixel becomes the new camera centre.
   const handleClick = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
       const rect = e.currentTarget.getBoundingClientRect();
       const clickX = e.clientX - rect.left;
       const clickY = e.clientY - rect.top;
 
-      // Convert minimap pixel to world coordinate
       const scale = MINIMAP_SCALE / hexSize;
       const worldX = clickX / scale;
       const worldY = clickY / scale;

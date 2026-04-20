@@ -4,6 +4,7 @@ interface HexCell {
   terrain: string;
   color: [number, number, number];
   elevation: number;
+  movement_cost: number;
   px: number;
   py: number;
 }
@@ -113,11 +114,18 @@ let wasmReady: WasmApi | null = null;
 export async function loadWasm(): Promise<WasmApi> {
   if (wasmReady) return wasmReady;
 
-  // @ts-expect-error — WASM glue loaded at runtime from public/
-  const wasmModule = await import(/* webpackIgnore: true */ "/wasm/game_core_wasm.js");
+  // Cache-bust the WASM glue and binary in development so edits to the Rust
+  // side aren't masked by the browser's compiled-module cache. Production
+  // builds hash the asset URL so the query parameter is harmless.
+  const bust = process.env.NODE_ENV === "production" ? "" : `?v=${Date.now()}`;
 
-  // --target web: domyślny export = init function, reszta = funkcje po init
-  await wasmModule.default();
+  const wasmModule = await import(/* webpackIgnore: true */ `/wasm/game_core_wasm.js${bust}`);
+
+  // --target web: domyślny export = init function, reszta = funkcje po init.
+  // Pass an explicit URL so the bindgen runtime refetches the binary too.
+  await wasmModule.default({
+    module_or_path: `/wasm/game_core_wasm_bg.wasm${bust}`,
+  });
 
   wasmReady = {
     init_grid: wasmModule.init_grid as (w: number, h: number) => void,

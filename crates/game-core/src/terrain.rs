@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use ts_rs::TS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
@@ -15,6 +16,57 @@ pub enum Terrain {
     Urban,
     Ice,
 }
+
+impl Terrain {
+    /// Canonical string name (matches Debug/Display/serde).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Terrain::DeepOcean => "DeepOcean",
+            Terrain::Ocean => "Ocean",
+            Terrain::Coast => "Coast",
+            Terrain::Plains => "Plains",
+            Terrain::Forest => "Forest",
+            Terrain::Hills => "Hills",
+            Terrain::Mountain => "Mountain",
+            Terrain::Desert => "Desert",
+            Terrain::Tundra => "Tundra",
+            Terrain::Urban => "Urban",
+            Terrain::Ice => "Ice",
+        }
+    }
+}
+
+/// Parse a `Terrain` from its canonical name. Unknown strings are rejected.
+impl FromStr for Terrain {
+    type Err = ParseTerrainError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "DeepOcean" => Terrain::DeepOcean,
+            "Ocean" => Terrain::Ocean,
+            "Coast" => Terrain::Coast,
+            "Plains" => Terrain::Plains,
+            "Forest" => Terrain::Forest,
+            "Hills" => Terrain::Hills,
+            "Mountain" => Terrain::Mountain,
+            "Desert" => Terrain::Desert,
+            "Tundra" => Terrain::Tundra,
+            "Urban" => Terrain::Urban,
+            "Ice" => Terrain::Ice,
+            _ => return Err(ParseTerrainError(s.to_string())),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ParseTerrainError(pub String);
+
+impl std::fmt::Display for ParseTerrainError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown terrain: {}", self.0)
+    }
+}
+
+impl std::error::Error for ParseTerrainError {}
 
 impl Terrain {
     /// CSS-like color for rendering (r, g, b 0-255).
@@ -57,5 +109,26 @@ impl Terrain {
 
     pub fn is_passable_land(self) -> bool {
         !matches!(self, Terrain::DeepOcean | Terrain::Ocean)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terrain_from_str_roundtrip() {
+        for t in [
+            Terrain::DeepOcean, Terrain::Ocean, Terrain::Coast, Terrain::Plains,
+            Terrain::Forest, Terrain::Hills, Terrain::Mountain, Terrain::Desert,
+            Terrain::Tundra, Terrain::Urban, Terrain::Ice,
+        ] {
+            assert_eq!(Terrain::from_str(t.as_str()).unwrap(), t);
+        }
+    }
+
+    #[test]
+    fn terrain_from_str_rejects_garbage() {
+        assert!(Terrain::from_str("Not a terrain").is_err());
     }
 }

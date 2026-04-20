@@ -136,7 +136,7 @@ pub fn line_of_sight_elevated(
     elevation_at: impl Fn(Hex) -> i32,
     blocking_height: impl Fn(Hex) -> i32,
 ) -> bool {
-    let line = from.line_to(from);
+    let line = from.line_to(to);
     let from_elev = elevation_at(from) + blocking_height(from);
     let to_elev = elevation_at(to) + blocking_height(to);
     let dist = from.distance(to) as f32;
@@ -145,7 +145,6 @@ pub fn line_of_sight_elevated(
         return true;
     }
 
-    // Check each intermediate hex — if its top is above the line from→to, LOS is blocked
     for (i, hex) in line.iter().enumerate() {
         if i == 0 || i == line.len() - 1 {
             continue;
@@ -217,5 +216,28 @@ mod tests {
     fn los_adjacent_always_clear() {
         let is_blocking = |_: Hex| true; // Even if everything "blocks"
         assert!(line_of_sight(Hex::new(0, 0), Hex::new(1, 0), is_blocking));
+    }
+
+    #[test]
+    fn los_elevated_flat_terrain_clear() {
+        let elev = |_: Hex| 0;
+        let block = |_: Hex| 0;
+        assert!(line_of_sight_elevated(Hex::new(0, 0), Hex::new(5, 0), elev, block));
+    }
+
+    #[test]
+    fn los_elevated_peak_blocks() {
+        // Mountain peak in the middle blocks a line between two sea-level hexes.
+        let elev = |h: Hex| if h.q == 3 && h.r == 0 { 500 } else { 0 };
+        let block = |_: Hex| 0;
+        assert!(!line_of_sight_elevated(Hex::new(0, 0), Hex::new(5, 0), elev, block));
+    }
+
+    #[test]
+    fn los_elevated_high_shooter_sees_over_obstacle() {
+        // Shooter stands on a tall mountain, obstacle is lower than the sight line.
+        let elev = |h: Hex| if h.q == 0 { 1000 } else { 0 };
+        let block = |h: Hex| if h.q == 3 && h.r == 0 { 100 } else { 0 };
+        assert!(line_of_sight_elevated(Hex::new(0, 0), Hex::new(5, 0), elev, block));
     }
 }

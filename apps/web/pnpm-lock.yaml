@@ -8,9 +8,6 @@ importers:
 
   .:
     dependencies:
-      game-core-wasm:
-        specifier: file:../../packages/game-core-wasm
-        version: file:../../packages/game-core-wasm
       next:
         specifier: 16.2.4
         version: 16.2.4(@babel/core@7.29.0)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
@@ -1164,9 +1161,6 @@ packages:
 
   functions-have-names@1.2.3:
     resolution: {integrity: sha512-xckBUXyTIqT97tq2x2AMb+g163b5JFysYk0x4qxNFwbfQkmNZoiRHb6sPzI9/QV33WeuvVYBUIiD4NzNIyqaRQ==}
-
-  game-core-wasm@file:../../packages/game-core-wasm:
-    resolution: {directory: ../../packages/game-core-wasm, type: directory}
 
   generator-function@2.0.1:
     resolution: {integrity: sha512-SFdFmIJi+ybC0vjlHN0ZGVGHc3lgE0DxPAT0djjVg+kjOnSqclqmj0KQ7ykTOLP6YxoqOvuAODGdcHJn+43q3g==}
@@ -3205,8 +3199,6 @@ snapshots:
       is-callable: 1.2.7
 
   functions-have-names@1.2.3: {}
-
-  game-core-wasm@file:../../packages/game-core-wasm: {}
 
   generator-function@2.0.1: {}
 

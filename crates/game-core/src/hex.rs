@@ -48,19 +48,21 @@ impl Hex {
         dq.abs().max(dr.abs()).max(ds.abs())
     }
 
-    /// Wrap-aware distance on Q axis only.
-    /// Takes the shorter path around the globe.
+    /// Wrap-aware cube distance on the Q axis.
+    /// Tries the three candidate images of `other` (direct, +width, -width)
+    /// and returns the minimum true hex distance. Correct — not approximate.
     pub fn distance_wrap(self, other: Hex, width: i32) -> i32 {
-        let dq = (self.q - other.q).abs();
-        let dq_wrap = width - dq;
-        let dq_min = dq.min(dq_wrap);
-        let dr = (self.r - other.r).abs();
-        let ds = (-(self.q - other.q) - (self.r - other.r)).abs();
-        let ds_wrap = width - (-(self.q - other.q)).abs();
-        // Approximate: just use shortest Q delta
-        let dq_eff = dq_min;
-        let ds_eff = ds.min(ds_wrap + dq_wrap - dq);
-        dq_eff.max(dr).max(ds_eff.min(dq_eff + dr))
+        let candidates = [other.q, other.q + width, other.q - width];
+        candidates
+            .iter()
+            .map(|&cq| {
+                let dq = self.q - cq;
+                let dr = self.r - other.r;
+                let ds = -dq - dr;
+                dq.abs().max(dr.abs()).max(ds.abs())
+            })
+            .min()
+            .unwrap()
     }
 
     /// Hexes in a ring of radius `n` around self.
@@ -222,5 +224,37 @@ mod tests {
         assert_eq!(line.len(), 4);
         assert_eq!(*line.first().unwrap(), Hex::new(0, 0));
         assert_eq!(*line.last().unwrap(), Hex::new(3, 0));
+    }
+
+    #[test]
+    fn distance_wrap_picks_shorter_side() {
+        let width = 100;
+        // 98 → 2 via wrap should be distance 4 (98→99→0→1→2), not 96.
+        let d = Hex::new(98, 0).distance_wrap(Hex::new(2, 0), width);
+        assert_eq!(d, 4);
+    }
+
+    #[test]
+    fn distance_wrap_no_wrap_when_direct_shorter() {
+        let width = 100;
+        let d = Hex::new(10, 0).distance_wrap(Hex::new(15, 0), width);
+        assert_eq!(d, 5);
+    }
+
+    #[test]
+    fn distance_wrap_equals_distance_on_same_hex() {
+        let width = 100;
+        let a = Hex::new(42, 17);
+        assert_eq!(a.distance_wrap(a, width), 0);
+    }
+
+    #[test]
+    fn distance_wrap_preserves_cube_triangle() {
+        // (99, 3) → (1, 0) via wrap. Treat (1, 0) as (101, 0):
+        // dq=99-101=-2, dr=3, ds=-1 → cube distance = max(2, 3, 1) = 3.
+        // Path: (99,3) → (0,2) → (0,1) → (1,0).
+        let width = 100;
+        let d = Hex::new(99, 3).distance_wrap(Hex::new(1, 0), width);
+        assert_eq!(d, 3);
     }
 }

@@ -165,22 +165,25 @@ impl BattlefieldInstance {
     ) -> Vec<&BattlefieldCell> {
         let sq3 = 3.0_f32.sqrt();
         let hex_w = sq3 * hex_size;
-        let hex_h = 2.0 * hex_size;
+        // Pointy-top: row pitch is 1.5 * size, not 2.0.
+        let row_h = 1.5 * hex_size;
 
-        let min_q = ((cam_x - view_width / 2.0) / hex_w).floor() as i32 - 1;
-        let max_q = ((cam_x + view_width / 2.0) / hex_w).ceil() as i32 + 1;
-        let min_r = ((cam_y - view_height / 2.0) / hex_h).floor() as i32 - 1;
-        let max_r = ((cam_y + view_height / 2.0) / hex_h).ceil() as i32 + 1;
+        let min_r = ((cam_y - view_height / 2.0) / row_h).floor() as i32 - 1;
+        let max_r = ((cam_y + view_height / 2.0) / row_h).ceil() as i32 + 1;
 
         let mut result = Vec::new();
         for r in min_r.max(0)..=max_r.min(self.height - 1) {
+            // Row r is shifted right by r/2 columns in pointy-top.
+            let offset = r as f32 / 2.0;
+            let min_q = ((cam_x - view_width / 2.0) / hex_w - offset).floor() as i32 - 1;
+            let max_q = ((cam_x + view_width / 2.0) / hex_w - offset).ceil() as i32 + 1;
             for q in min_q.max(0)..=max_q.min(self.width - 1) {
                 if let Some(cell) = self.get_cell(q, r) {
                     let (px, py) = crate::hex::hex_to_pixel(cell.hex, hex_size);
                     if px >= cam_x - view_width / 2.0 - hex_w
                         && px <= cam_x + view_width / 2.0 + hex_w
-                        && py >= cam_y - view_height / 2.0 - hex_h
-                        && py <= cam_y + view_height / 2.0 + hex_h
+                        && py >= cam_y - view_height / 2.0 - row_h
+                        && py <= cam_y + view_height / 2.0 + row_h
                     {
                         result.push(cell);
                     }

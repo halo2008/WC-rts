@@ -39,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             query_builder.push(", ");
             query_builder.push_bind(cell.hex.r);
             query_builder.push(", ");
-            query_builder.push_bind(format!("{:?}", cell.terrain));
+            query_builder.push_bind(cell.terrain.as_str());
             query_builder.push(", ");
             query_builder.push_bind(cell.elevation);
             query_builder.push(")");

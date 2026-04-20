@@ -1,10 +1,12 @@
 use axum::{
     Router,
     extract::{Path, Query, State},
+    http::StatusCode,
     routing::get,
     response::Json,
 };
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 use crate::AppState;
 
 pub fn routes() -> Router<AppState> {
@@ -22,21 +24,38 @@ struct HexResponse {
     r: i32,
     terrain: String,
     elevation: i32,
-    nation_id: Option<uuid::Uuid>,
+    nation_id: Option<Uuid>,
+    resource: Option<String>,
+    infrastructure_level: i16,
 }
 
 async fn get_hex(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Path((q, r)): Path<(i32, i32)>,
 ) -> Result<Json<HexResponse>, StatusCode> {
-    // TODO: Query from database once hex_map table is seeded
-    // For now return a placeholder
+    let row = sqlx::query_as::<_, (i32, i32, String, i32, Option<Uuid>, Option<String>, i16)>(
+        "SELECT q, r, terrain, elevation, nation_id, resource, infrastructure_level \
+         FROM hex_map WHERE q = $1 AND r = $2",
+    )
+    .bind(q)
+    .bind(r)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!("DB error fetching hex: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?
+    .ok_or(StatusCode::NOT_FOUND)?;
+
+    let (q, r, terrain, elevation, nation_id, resource, infrastructure_level) = row;
     Ok(Json(HexResponse {
         q,
         r,
-        terrain: "Plains".to_string(),
-        elevation: 0,
-        nation_id: None,
+        terrain,
+        elevation,
+        nation_id,
+        resource,
+        infrastructure_level,
     }))
 }
 
@@ -49,23 +68,59 @@ struct RegionQuery {
 
 #[derive(Serialize)]
 struct RegionResponse {
+    center_q: i32,
+    center_r: i32,
+    radius: i32,
     hexes: Vec<HexResponse>,
 }
 
+/// Query a hex neighborhood. `radius` is clamped to 50 to bound query size.
+/// Uses cube-distance filtering in SQL so oceans on the far side of the wrap
+/// aren't pulled in by a naive bounding-box search.
 async fn get_region(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Query(query): Query<RegionQuery>,
 ) -> Result<Json<RegionResponse>, StatusCode> {
-    let _radius = query.radius.unwrap_or(5).min(50);
-    // TODO: Query from database with wrap-aware range
+    let radius = query.radius.unwrap_or(5).clamp(0, 50);
+
+    // Cube-distance filter: max(|dq|, |dr|, |-dq-dr|) <= radius.
+    let rows = sqlx::query_as::<_, (i32, i32, String, i32, Option<Uuid>, Option<String>, i16)>(
+        "SELECT q, r, terrain, elevation, nation_id, resource, infrastructure_level \
+         FROM hex_map \
+         WHERE GREATEST(\
+                 ABS(q - $1), \
+                 ABS(r - $2), \
+                 ABS((-1) * (q - $1) - (r - $2))\
+             ) <= $3",
+    )
+    .bind(query.q)
+    .bind(query.r)
+    .bind(radius)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!("DB error fetching region: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let hexes = rows
+        .into_iter()
+        .map(|(q, r, terrain, elevation, nation_id, resource, infrastructure_level)| HexResponse {
+            q,
+            r,
+            terrain,
+            elevation,
+            nation_id,
+            resource,
+            infrastructure_level,
+        })
+        .collect();
+
     Ok(Json(RegionResponse {
-        hexes: vec![HexResponse {
-            q: query.q,
-            r: query.r,
-            terrain: "Plains".to_string(),
-            elevation: 0,
-            nation_id: None,
-        }],
+        center_q: query.q,
+        center_r: query.r,
+        radius,
+        hexes,
     }))
 }
 
@@ -82,7 +137,7 @@ async fn get_tile(
     State(_state): State<AppState>,
     Path((lod, x, y)): Path<(u32, u32, u32)>,
 ) -> Result<Json<TileResponse>, StatusCode> {
-    // TODO: Load pre-rendered LOD tile from storage
+    // LOD tile pipeline not implemented yet — planned for Etap 1.7.B.
     Ok(Json(TileResponse {
         lod,
         x,
@@ -90,5 +145,3 @@ async fn get_tile(
         data: vec![],
     }))
 }
-
-use axum::http::StatusCode;

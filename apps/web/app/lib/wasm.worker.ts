@@ -15,6 +15,7 @@ interface HexCell {
   terrain: string;
   color: [number, number, number];
   elevation: number;
+  movement_cost: number;
   px: number;
   py: number;
 }
@@ -44,9 +45,12 @@ let wasm: WasmModule | null = null;
 async function initWasm() {
   if (wasm) return;
 
-  // @ts-expect-error — WASM loaded at runtime
-  const wasmModule = await import(/* webpackIgnore: true */ "/wasm/game_core_wasm.js");
-  await wasmModule.default();
+  const bust = process.env.NODE_ENV === "production" ? "" : `?v=${Date.now()}`;
+
+  const wasmModule = await import(/* webpackIgnore: true */ `/wasm/game_core_wasm.js${bust}`);
+  await wasmModule.default({
+    module_or_path: `/wasm/game_core_wasm_bg.wasm${bust}`,
+  });
   wasm = wasmModule as unknown as WasmModule;
 }
 

@@ -52,6 +52,31 @@ impl StrategicGrid {
         }
     }
 
+    /// Build a grid by sampling an azimuthal-equidistant "flat-earth" image
+    /// (packed RGB bytes, row-major, length = `iw * ih * 3`). Terrain per
+    /// hex is classified from the pixel colour; elevation is derived from
+    /// the terrain type. See `crate::map_sample`.
+    pub fn from_map_rgb(width: i32, height: i32, pixels: &[u8], iw: u32, ih: u32) -> Self {
+        let samples = crate::map_sample::sample_grid_from_map(pixels, iw, ih, width, height);
+        let mut cells = Vec::with_capacity(samples.len());
+        for r in 0..height {
+            for q in 0..width {
+                let idx = (r * width + q) as usize;
+                let (terrain, elevation) = samples[idx];
+                cells.push(HexCell {
+                    hex: Hex::new(q, r),
+                    terrain,
+                    elevation,
+                });
+            }
+        }
+        Self {
+            width,
+            height,
+            cells,
+        }
+    }
+
     pub fn get(&self, q: i32, r: i32) -> Option<&HexCell> {
         if r < 0 || r >= self.height {
             return None;

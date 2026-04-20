@@ -14,11 +14,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("Connected to PostgreSQL");
 
-    let width = 1200;
-    let height = 600;
+    let width = 1200i32;
+    let height = 600i32;
 
-    tracing::info!("Generating strategic grid {}x{}...", width, height);
-    let grid = StrategicGrid::new(width, height);
+    let map_path = std::env::var("MAP_PNG")
+        .unwrap_or_else(|_| "apps/web/public/maps/flat-earth.png".to_string());
+
+    let grid = match image::open(&map_path) {
+        Ok(dyn_img) => {
+            let rgb = dyn_img.to_rgb8();
+            let iw = rgb.width();
+            let ih = rgb.height();
+            tracing::info!("Sampling terrain from {} ({}x{})", map_path, iw, ih);
+            StrategicGrid::from_map_rgb(width, height, rgb.as_raw(), iw, ih)
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Failed to load {}: {}. Falling back to procedural terrain.",
+                map_path,
+                e
+            );
+            StrategicGrid::new(width, height)
+        }
+    };
 
     // Batch insert hex data into the database
     const BATCH_SIZE: usize = 10_000;

@@ -82,6 +82,13 @@ interface BuildingTypeInfo {
 export interface WasmApi {
   // Strategic map (Etap 1)
   init_grid: (width: number, height: number) => void;
+  init_grid_from_map: (
+    width: number,
+    height: number,
+    pixels: Uint8Array,
+    iw: number,
+    ih: number
+  ) => void;
   get_viewport_hexes: (
     cam_x: number,
     cam_y: number,
@@ -129,6 +136,13 @@ export async function loadWasm(): Promise<WasmApi> {
 
   wasmReady = {
     init_grid: wasmModule.init_grid as (w: number, h: number) => void,
+    init_grid_from_map: wasmModule.init_grid_from_map as (
+      w: number,
+      h: number,
+      pixels: Uint8Array,
+      iw: number,
+      ih: number
+    ) => void,
     get_viewport_hexes: (cam_x, cam_y, vw, vh, hs) =>
       wasmModule.get_viewport_hexes(cam_x, cam_y, vw, vh, hs) as unknown as HexCell[],
     hex_distance: wasmModule.hex_distance as (

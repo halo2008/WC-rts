@@ -40,6 +40,15 @@ pub fn init_grid(width: i32, height: i32) {
     GRID.get_or_init(|| StrategicGrid::new(width, height));
 }
 
+/// Initialise the strategic grid by sampling a flat-earth PNG decoded in JS
+/// (expects packed RGB bytes, row-major, length = `iw * ih * 3`). Same
+/// classification as the server seed tool — hex terrain in the browser
+/// matches what the server stores in `hex_map`.
+#[wasm_bindgen]
+pub fn init_grid_from_map(width: i32, height: i32, pixels: &[u8], iw: u32, ih: u32) {
+    GRID.get_or_init(|| StrategicGrid::from_map_rgb(width, height, pixels, iw, ih));
+}
+
 #[wasm_bindgen]
 pub fn get_viewport_hexes(
     cam_x: f32,

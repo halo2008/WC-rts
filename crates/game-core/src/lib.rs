@@ -1,6 +1,7 @@
 pub mod hex;
 pub mod terrain;
 pub mod grid;
+pub mod map_sample;
 pub mod pathfinding;
 pub mod spatial;
 pub mod building;
@@ -13,6 +14,7 @@ pub mod combat;
 pub use hex::{Hex, hex_to_pixel, pixel_to_hex};
 pub use terrain::{Terrain, ParseTerrainError};
 pub use grid::{HexCell, StrategicGrid, ViewportCell};
+pub use map_sample::{classify_pixel, sample_grid_from_map, terrain_elevation};
 pub use pathfinding::{astar, astar_limited, reachable_hexes};
 pub use spatial::{HexIndex, line_of_sight, line_of_sight_elevated};
 

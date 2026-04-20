@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Application, Container, Graphics, Text, TextStyle } from "pixi.js";
+import { Application, Assets, Container, Graphics, Sprite, Text, Texture, TextStyle } from "pixi.js";
 import { loadWasm, type HexCell, type WasmApi } from "../lib/wasm-loader";
 import Minimap from "./Minimap";
 
@@ -46,6 +46,40 @@ const TERRAIN_NAMES: Record<string, string> = {
   Urban: "Miasto",
   Ice: "Lód",
 };
+
+/// Fetch + decode the flat-earth PNG into a packed RGB byte array suitable for
+/// `wasm.init_grid_from_map`. Uses an offscreen 2D canvas to pull raw pixels —
+/// the Pixi texture is GPU-only and can't be read back cheaply. Runs once per
+/// map load; the ~750px PNG is small so the memory cost is trivial.
+async function loadFlatEarthRgb(): Promise<{
+  pixels: Uint8Array;
+  width: number;
+  height: number;
+}> {
+  const img = new Image();
+  img.src = "/maps/flat-earth.png";
+  await new Promise<void>((resolve, reject) => {
+    img.onload = () => resolve();
+    img.onerror = () => reject(new Error("flat-earth image failed to load"));
+  });
+  const w = img.naturalWidth;
+  const h = img.naturalHeight;
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) throw new Error("2d canvas context unavailable");
+  ctx.drawImage(img, 0, 0);
+  const { data } = ctx.getImageData(0, 0, w, h);
+  // ImageData is RGBA; the WASM side wants packed RGB. Strip alpha.
+  const rgb = new Uint8Array(w * h * 3);
+  for (let i = 0, j = 0; i < data.length; i += 4, j += 3) {
+    rgb[j] = data[i];
+    rgb[j + 1] = data[i + 1];
+    rgb[j + 2] = data[i + 2];
+  }
+  return { pixels: rgb, width: w, height: h };
+}
 
 // --- Helper functions ---
 function hexToPixel(
@@ -187,6 +221,8 @@ export default function HexMap({
   const groupLabelPoolRef = useRef<Map<number, Text>>(new Map());
   const capitalsLayerRef = useRef<Container | null>(null);
   const capitalLabelPoolRef = useRef<Map<string, Text>>(new Map());
+  /// Real-map flat-earth PNG shown as a sprite underneath hexes in polar mode.
+  const bgSpriteRef = useRef<Sprite | null>(null);
 
   // Camera state (refs — no React re-renders)
   const camX = useRef(0);
@@ -252,7 +288,18 @@ export default function HexMap({
       if (!mounted) return;
       wasmRef.current = wasm;
 
-      wasm.init_grid(GRID_WIDTH, GRID_HEIGHT);
+      // Initialise the strategic grid. Try to sample terrain from the
+      // flat-earth PNG (same source the server seed uses) so hex colours match
+      // the polar background sprite. Any failure falls back to the procedural
+      // generator so dev still works without the PNG.
+      try {
+        const rgb = await loadFlatEarthRgb();
+        wasm.init_grid_from_map(GRID_WIDTH, GRID_HEIGHT, rgb.pixels, rgb.width, rgb.height);
+      } catch (e) {
+        console.warn("flat-earth PNG sampling failed, using procedural:", e);
+        wasm.init_grid(GRID_WIDTH, GRID_HEIGHT);
+      }
+      if (!mounted) return;
 
       const app = new Application();
       await app.init({
@@ -275,9 +322,13 @@ export default function HexMap({
       containerRef.current!.appendChild(app.canvas as HTMLCanvasElement);
       appRef.current = app;
 
-      // Six layers, bottom-up: terrain → edges → capitals → units → groups → highlights.
+      // Seven layers, bottom-up: bg sprite → terrain → edges → capitals → units → groups → highlights.
+      // Background sprite renders only in polar mode (azimuthal PNG of Earth).
       // Capitals sit *under* units so a friendly infantry stack on the capital
       // hex doesn't get hidden by its own flag disc.
+      const bgSprite = new Sprite(Texture.EMPTY);
+      bgSprite.anchor.set(0.5, 0.5);
+      bgSprite.visible = false;
       const graphics = new Graphics();
       const edgesLayer = new Graphics();
       const capitalsLayer = new Container();
@@ -288,12 +339,23 @@ export default function HexMap({
       const groupsGraphics = new Graphics();
       groupsLayer.addChild(groupsGraphics);
       const highlight = new Graphics();
+      app.stage.addChild(bgSprite);
       app.stage.addChild(graphics);
       app.stage.addChild(edgesLayer);
       app.stage.addChild(capitalsLayer);
       app.stage.addChild(unitsLayer);
       app.stage.addChild(groupsLayer);
       app.stage.addChild(highlight);
+      bgSpriteRef.current = bgSprite;
+
+      // Async-load flat-earth PNG — non-blocking; hexes render even if it fails.
+      Assets.load<Texture>("/maps/flat-earth.png")
+        .then((tex) => {
+          if (!mounted || !bgSpriteRef.current) return;
+          bgSpriteRef.current.texture = tex;
+          hexDirty.current = true;
+        })
+        .catch((e) => console.warn("flat-earth texture load failed:", e));
       graphicsRef.current = graphics;
       edgesLayerRef.current = edgesLayer;
       unitsLayerRef.current = unitsLayer;
@@ -405,6 +467,26 @@ export default function HexMap({
 
       // ---- Drawing ----
 
+      /// Position/size the flat-earth background sprite. Visible only in polar
+      /// mode, where it sits directly under the hex discs; flat mode hides it.
+      function updateBackground(): void {
+        const bg = bgSpriteRef.current;
+        if (!bg) return;
+        if (projection.current !== "polar" || bg.texture === Texture.EMPTY) {
+          bg.visible = false;
+          return;
+        }
+        const { cx, cy, maxRadius } = polarParams();
+        bg.visible = true;
+        bg.position.set(cx, cy);
+        // Diameter = 2 × maxRadius; PNG's ice-wall rim sits at the image edge,
+        // which visually aligns with our explicit outer ring at maxRadius*1.03.
+        const diameter = maxRadius * 2;
+        bg.width = diameter;
+        bg.height = diameter;
+        bg.alpha = 0.85;
+      }
+
       function drawHexes(): void {
         const vw = app.screen.width;
         const vh = app.screen.height;
@@ -446,7 +528,7 @@ export default function HexMap({
 
         if (proj === "polar") {
           const { cx, cy, maxRadius } = polarParams();
-          // Outer dark ring — explicit ice-wall around the disc.
+          // Outer dark ring — explicit ice-wall frame around the disc.
           graphics.circle(cx, cy, maxRadius * 1.03);
           graphics.fill({ color: 0x0b2a4a, alpha: 0.9 });
 
@@ -454,6 +536,13 @@ export default function HexMap({
           // neighbours collapse onto the same pixel. Keeps the circle count
           // around 30-60k regardless of grid size.
           const stride = Math.max(1, Math.floor((GRID_HEIGHT * 800) / (maxRadius * 200)));
+
+          // Lower alpha when background sprite is loaded — lets the real-map
+          // PNG continents show through the hex tiles.
+          const hexAlpha =
+            bgSpriteRef.current && bgSpriteRef.current.texture !== Texture.EMPTY
+              ? 0.45
+              : 0.95;
 
           for (const [color, bucket] of buckets) {
             graphics.beginPath();
@@ -463,7 +552,7 @@ export default function HexMap({
               const rad = Math.max(1.5, p.localScale * 0.9 * stride);
               graphics.circle(p.x, p.y, rad);
             }
-            graphics.fill({ color, alpha: 0.95 });
+            graphics.fill({ color, alpha: hexAlpha });
           }
           lastPolarStrideRef.current = stride;
           return;
@@ -1183,6 +1272,7 @@ export default function HexMap({
 
         if (hexDirty.current) {
           hexDirty.current = false;
+          updateBackground();
           drawHexes();
           edgesDirty.current = true;
           unitsDirty.current = true;
